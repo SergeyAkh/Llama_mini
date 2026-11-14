@@ -14,7 +14,9 @@ import importlib
 import model.GPT_full_model as hf
 importlib.reload(hf)
 
-def get_device():
+def get_device(fixed=None):
+    if fixed is not None:
+        return torch.device(fixed)
     if torch.cuda.is_available():
         return torch.device("cuda")
     elif torch.backends.mps.is_available():
