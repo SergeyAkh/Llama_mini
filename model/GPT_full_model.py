@@ -4,6 +4,7 @@ from model.Load_model import GPT2Loader
 from model.GPT_manual_architecture import GPTModel, MultiHeadAttention, FeedForward
 from model.LoRA import LoRALinear
 from model.DoRA import DoRALinear
+import torch
 import torch.nn as nn
 
 import importlib
@@ -52,13 +53,13 @@ class GPT2Manager:
         # --- Create new embeddings ---
         new_tok_emb = nn.Embedding(new_vocab_size, emb_dim).to(device)
         new_tok_emb.weight.data[:old_vocab_size] = self.model.tok_emb.weight.data
-        nn.init.normal_(new_tok_emb.weight.data[old_vocab_size:], mean=0.0, std=0.02)
-
+        new_tok_emb.weight.data[old_vocab_size:] = self.model.tok_emb.weight.data[:old_vocab_size].mean(dim=0,
+                                                                                                        keepdim=True)
         # --- Create new output head ---
         new_out_head = nn.Linear(emb_dim, new_vocab_size, bias=False).to(device)
         new_out_head.weight.data[:old_vocab_size] = self.model.out_head.weight.data
-        nn.init.normal_(new_out_head.weight.data[old_vocab_size:], mean=0.0, std=0.02)
-
+        new_out_head.weight.data[old_vocab_size:] = self.model.out_head.weight.data[:old_vocab_size].mean(dim=0,
+                                                                                                          keepdim=True)
         # --- CRITICAL: Register properly as modules ---
         # Remove old modules first
         delattr(self.model, 'tok_emb')
@@ -69,11 +70,28 @@ class GPT2Manager:
         self.model.add_module('out_head', new_out_head)
 
     def freeze_except_adapter(self, model):
+        """Train only the adapters (LoRA/DoRA A, B and DoRA magnitude) ...
+
+        The old version matched any parameter name containing an uppercase "A" or "B", which
+        missed the DoRA magnitude vectors, and it froze tok_emb / out_head completely - including the
+        randomly initialised rows of the two new tokens <|user|> and <|assistant|>, which could
+        therefore never be learned.
+        """
         for name, param in model.named_parameters():
-            if "A" in name or "B" in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+            param.requires_grad = name.endswith((".A", ".B", ".magnitude"))
+
+        # ... plus the rows of the NEW special tokens in the embedding and output head.
+        # The pretrained rows stay untouched: their gradient is zeroed by a hook. (Use weight_decay=0
+        # with adapters, otherwise AdamW would still shrink the frozen rows slightly.)
+        base_vocab = Config.BASE_CONFIG["vocab_size"]   # 50257 for every GPT-2 size
+
+        def only_new_rows(grad):
+            keep = (torch.arange(grad.shape[0], device=grad.device) >= base_vocab)
+            return grad * keep.unsqueeze(1).to(grad.dtype)
+
+        for weight in (model.tok_emb.weight, model.out_head.weight):
+            weight.requires_grad = True
+            weight.register_hook(only_new_rows)
 
     def apply_lora(self, model, enabled=True):
 
