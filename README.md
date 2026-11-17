@@ -95,3 +95,4 @@ Larger GPT-2 sizes and more conversation data are the next things to try.
 Built on OpenAI's GPT-2, the `yahma/alpaca-cleaned` dataset (derived from Stanford Alpaca) and
 `OpenAssistant/oasst1`. The weights and datasets are not included here; check the licence of each
 source before reusing them.
+# Llama_mini
