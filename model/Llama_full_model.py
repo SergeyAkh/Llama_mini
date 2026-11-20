@@ -1,14 +1,14 @@
 from os import abort
-from srs.LLM_classification.config import Config
+from srs.LLM.config import Config
 from model.Load_model import GPT2Loader
-from model.GPT_manual_architecture import GPTModel, MultiHeadAttention, FeedForward
+from model.Llama_manual_architecture import LlamaModel, GroupedQueryAttention, FeedForward
 from model.LoRA import LoRALinear
 from model.DoRA import DoRALinear
 import torch
 import torch.nn as nn
 
 import importlib
-import model.GPT_manual_architecture as hf
+import model.Llama_manual_architecture as hf
 importlib.reload(hf)
 
 class GPT2Manager:
@@ -198,7 +198,7 @@ class GPT2Manager:
 
         self.settings, self.params = self.loader.download_and_load()
 
-        self.model = GPTModel(self.base_config)
+        self.model = Llamamodel(self.base_config)
 
         if inference is None:
             self.loader.load_weights_into_gpt(self.model)

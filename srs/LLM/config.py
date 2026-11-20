@@ -57,6 +57,19 @@ class Config:
         "gpt2-xl (1558M)": {"emb_dim": 1600, "n_layers": 48, "n_heads": 25},
     }
 
+    LLAMA_CONFIG = {
+        "vocab_size": 49152,
+        "context_length": 8192,
+        "emb_dim": 576,
+        "hidden_dim": 1536,
+        "n_layers": 30,
+        "n_heads": 9,
+        "n_kv_groups": 3,
+        "rope_base": 100_000,
+        "rms_eps": 1e-5,
+        "tie_embeddings": True,
+    }
+
     @classmethod
     def get_model_config(cls):
 

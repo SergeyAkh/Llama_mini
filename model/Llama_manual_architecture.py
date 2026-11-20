@@ -1,84 +1,116 @@
-# GPT_manual_architecture.py
+# Llama_manual_architecture.py
 import torch.nn as nn
 import torch
 import math
+import importlib
+import srs.LLM.config as cfg_module
 
-class FeedForward(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(cfg["emb_dim"], 4 * cfg["emb_dim"]),
-            GELU(), ## Activation
-            nn.Linear(4 * cfg["emb_dim"], cfg["emb_dim"]),
-        )
+importlib.reload(cfg_module)
+from srs.LLM.config import Config
 
-    def forward(self, x):
-        return self.layers(x)
 
-class GELU(nn.Module):
+
+
+
+class SiLU(nn.Module):
     def __init__(self):
         super().__init__()
 
     def forward(self, x):
-        # return 0.5 * x * (1 + torch.tanh(
-        #     math.sqrt(2.0 / math.pi) *
-        #     (x + 0.044715 * torch.pow(x, 3))
-        # ))
-        return torch.nn.functional.gelu(x)
+        return x * torch.sigmoid(x)
 
-class LayerNorm(nn.Module):
-    def __init__(self, emb_dim):
+class FeedForward(nn.Module):
+    def __init__(self, cfg):
         super().__init__()
-        self.eps = 1e-5
-        self.scale = nn.Parameter(torch.ones(emb_dim))
-        self.shift = nn.Parameter(torch.zeros(emb_dim))
+        emb, hid = cfg["emb_dim"], cfg["hidden_dim"]
+        self.gate_proj = nn.Linear(emb, hid, bias=False)
+        self.up_proj   = nn.Linear(emb, hid, bias=False)
+        self.down_proj = nn.Linear(hid, emb, bias=False)
+        self.silu = SiLU()
 
     def forward(self, x):
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
-        norm_x = (x - mean) / torch.sqrt(var + self.eps)
-        return self.scale * norm_x + self.shift
+        gate = self.silu(self.gate_proj(x))      # gate_proj on x, then silu
+        up   = self.up_proj(x)     # up_proj on x
+        return self.down_proj(gate * up)      # down_proj on (gate * up)
 
-
-class MultiHeadAttention(nn.Module):
-    def __init__(self, d_in, d_out, context_length, dropout, num_heads, qkv_bias=True):
+class RMSNorm(nn.Module):
+    def __init__(self, emb_dim, eps=1e-5):
         super().__init__()
-        assert (d_out % num_heads == 0), \
-            "d_out must be divisible by num_heads"
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(emb_dim))
 
+    def forward(self, x):
+        x_sqr = torch.pow(x, 2)
+        mean = x_sqr.mean(dim=-1, keepdim=True)
+        rms_x = torch.sqrt(mean + self.eps)
+        return x / rms_x * self.weight
+
+def compute_rope_params(head_dim, theta_base=10_000, context_length=4096):
+        assert head_dim % 2 == 0
+
+        # one frequency per PAIR of dims → head_dim // 2 values
+        inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2).float() / head_dim))  # hint: torch.arange(0, head_dim, 2).float()
+
+        positions = torch.arange(0, context_length, 1).float()  # 0, 1, ..., context_length-1  (float)
+
+        angles = positions[:, None] * inv_freq[None, :]  # outer product → shape (context_length, head_dim // 2)
+        # hint: positions[:, None] * inv_freq[None, :]
+
+        angles = torch.cat([angles, angles], dim=-1)  # → (context_length, head_dim)
+
+        return torch.cos(angles), torch.sin(angles)
+
+def apply_rope(x, cos, sin):
+    b, h, seq_len, head_dim = x.shape
+
+    half = head_dim // 2
+
+    x1 = x[...,:half]     # first half of the last dim
+    x2 = x[...,half:]      # second half of the last dim
+    rotated = torch.cat([-x2, x1], dim=-1)   # hint: (-x2, x1)
+
+    cos = cos[:seq_len, :]     # (seq_len, head_dim) — broadcasts over b and h
+    sin = sin[:seq_len, :]
+
+    return x * cos + rotated * sin
+
+class GroupedQueryAttention(nn.Module):
+    def __init__(self, d_in, d_out,  num_heads, num_kv_groups):
+        super().__init__()
+        assert d_out % num_heads == 0
+        assert num_heads % num_kv_groups == 0
         self.d_out = d_out
         self.num_heads = num_heads
+        self.num_kv_groups = num_kv_groups
         self.head_dim = d_out // num_heads
+        self.group_size = num_heads // num_kv_groups
 
-        self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
-        self.W_key = nn.Linear(d_in, d_out, bias=qkv_bias)
-        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
-        self.out_proj = nn.Linear(d_out, d_out)
-        self.dropout = nn.Dropout(dropout)
-        self.register_buffer(
-            "mask",
-            torch.triu(torch.ones(context_length, context_length),
-                       diagonal=1)
-        )
+        self.q_proj = nn.Linear(d_in, num_heads * self.head_dim, bias=False)   # all query heads
+        self.k_proj = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False)   # only num_kv_groups heads!
+        self.v_proj = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False)   # same as k_proj
+        self.o_proj = nn.Linear(d_out, d_out, bias=False)
 
-    def forward(self, x, attention_mask=None):
-        b, num_tokens, d_in = x.shape
+    def forward(self, x, cos, sin, attention_mask=None):
+        b, num_tokens, _ = x.shape
 
-        keys = self.W_key(x)
-        queries = self.W_query(x)
-        values = self.W_value(x)
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
 
-        keys = keys.view(b, num_tokens, self.num_heads, self.head_dim)
-        values = values.view(b, num_tokens, self.num_heads, self.head_dim)
-        queries = queries.view(b, num_tokens, self.num_heads, self.head_dim)
+        q = q.view(b, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(b, num_tokens, self.num_kv_groups, self.head_dim).transpose(1, 2)
+        v = v.view(b, num_tokens, self.num_kv_groups, self.head_dim).transpose(1, 2)
 
-        keys = keys.transpose(1, 2)
-        queries = queries.transpose(1, 2)
-        values = values.transpose(1, 2)
+        q = apply_rope(q, cos, sin)
+        k = apply_rope(k, cos, sin)
 
-        attn_scores = (queries @ keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+        k = k.repeat_interleave(self.num_kv_groups, dim=1)
+        v = v.repeat_interleave(self.num_kv_groups, dim=1)
 
-        mask_bool = self.mask[:num_tokens, :num_tokens].to(x.device).bool()
+
+        attn_scores = (q @ k.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+        mask_bool = torch.triu(torch.ones(num_tokens, num_tokens, device=x.device), diagonal=1).bool()
         attn_scores = attn_scores.masked_fill(mask_bool, -1e4)
 
         if attention_mask is not None:
@@ -87,75 +119,67 @@ class MultiHeadAttention(nn.Module):
 
         attn_weights = torch.softmax(attn_scores, dim=-1)
 
-        context_vec = (attn_weights @ values).transpose(1, 2)
+        context_vec = (attn_weights @ v).transpose(1, 2)
 
         context_vec = context_vec.contiguous().view(b, num_tokens, self.d_out)
-        context_vec = self.out_proj(context_vec)
+        context_vec = self.o_proj(context_vec)
 
         return context_vec
 
 class TransformerBlock(nn.Module):
     def __init__(self, cfg):
         super().__init__()
-        self.att = MultiHeadAttention(
+        self.self_attn = GroupedQueryAttention(
             d_in=cfg["emb_dim"],
             d_out=cfg["emb_dim"],
-            context_length=cfg["context_length"],
             num_heads=cfg["n_heads"],
-            dropout=cfg["drop_rate"],
-            qkv_bias=cfg["qkv_bias"])
-        self.ff = FeedForward(cfg)
-        self.norm1 = LayerNorm(cfg["emb_dim"])
-        self.norm2 = LayerNorm(cfg["emb_dim"])
-        self.drop_shortcut = nn.Dropout(cfg["drop_rate"])
+            num_kv_groups=cfg["n_kv_groups"])
+        self.mlp = FeedForward(cfg)
+        self.input_layernorm = RMSNorm(cfg["emb_dim"], eps=cfg["rms_eps"])
+        self.post_attention_layernorm = RMSNorm(cfg["emb_dim"], eps=cfg["rms_eps"])
 
-    def forward(self, x, attention_mask=None):
+    def forward(self, x, cos, sin, attention_mask=None):
         shortcut = x
-        x = self.norm1(x)
-        x = self.att(x, attention_mask)
-        # x = self.att(x)
-        x = self.drop_shortcut(x)
+        x = self.input_layernorm(x)
+        x = self.self_attn(x, cos, sin, attention_mask)
         x = x + shortcut
 
         shortcut = x
-        x = self.norm2(x)
-        x = self.ff(x)
-        x = self.drop_shortcut(x)
+        x = self.post_attention_layernorm(x)
+        x = self.mlp(x)
         x = x + shortcut
-
         return x
 
 
-class GPTModel(nn.Module):
+class LlamaModel(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         # self.model = None
         self.tok_emb = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"])
-        self.pos_emb = nn.Embedding(cfg["context_length"], cfg["emb_dim"])
-        self.drop_emb = nn.Dropout(cfg["drop_rate"])
 
-        self.trf_blocks = nn.Sequential(
-            *[TransformerBlock(cfg) for _ in range(cfg["n_layers"])])
+        self.trf_blocks = nn.ModuleList(
+            [TransformerBlock(cfg) for _ in range(cfg["n_layers"])])
 
-        self.final_norm = LayerNorm(cfg["emb_dim"])
-        self.out_head = nn.Linear(
-            cfg["emb_dim"], cfg["vocab_size"], bias=False
-        )
+        self.final_norm = RMSNorm(cfg["emb_dim"], eps=cfg["rms_eps"])
+        self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False)
+
+        if cfg["tie_embeddings"]:
+            self.out_head.weight = self.tok_emb.weight   # same tensor, not a copy
+
+        cos, sin = compute_rope_params(
+            head_dim=cfg["emb_dim"]//cfg["n_heads"],                  # emb_dim // n_heads
+            theta_base=cfg["rope_base"],
+            context_length=cfg["context_length"])
+
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
 
     def forward(self, input_ids, attention_mask = None):
         batch_size, seq_len = input_ids.shape
-        tok_embeds = self.tok_emb(input_ids)
-        # pos_embeds = self.pos_emb(torch.arange(seq_len, device=in_idx.device))
-        pos = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
-        pos_embeds = self.pos_emb(pos)  # (1, seq, d)
-        x = tok_embeds + pos_embeds
-        x = self.drop_emb(x)
-
+        x = self.tok_emb(input_ids)
         for block in self.trf_blocks:
-            x = block(x, attention_mask)
+            x = block(x, cos=self.cos, sin=self.sin, attention_mask=attention_mask)
 
-        # x = self.trf_blocks(x)
         x = self.final_norm(x)
         logits = self.out_head(x)
-
         return logits
