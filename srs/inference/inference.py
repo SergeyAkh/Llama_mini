@@ -40,7 +40,7 @@ def clear_history(history):
     print("History has been cleared!")
 
 def main():
-    print("Chat started. Type 'exit' to quit.\n")
+    print("Chat started. Type 'clear' to clear history. Type 'exit' to quit.\n")
 
     history = []
 

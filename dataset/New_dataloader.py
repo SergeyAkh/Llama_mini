@@ -12,7 +12,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
-from srs.LLM_classification.config import Config
+from srs.LLM.config import Config
 from dataset.chat_format import compute_labels, truncate_to_last_complete_turn
 from dataset.batching import BucketBatchSampler
 

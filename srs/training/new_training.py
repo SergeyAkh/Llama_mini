@@ -22,7 +22,7 @@ from torch.optim import AdamW
 from tqdm import tqdm
 from transformers import get_cosine_schedule_with_warmup
 
-from srs.LLM_classification.config import Config
+from srs.LLM.config import Config
 from srs.training.help_func import get_device, get_tokenizer, get_model
 import dataset.get_prep_data as ds_prep
 import dataset.New_dataloader as DL

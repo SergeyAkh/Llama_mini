@@ -11,7 +11,7 @@ from torch.nn import CrossEntropyLoss
 from torch.utils.data import dataloader
 
 from tqdm import tqdm
-from srs.LLM_classification.config import Config
+from srs.LLM.config import Config
 
 import dataset.get_prep_data as ds_prep
 

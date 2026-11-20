@@ -2,7 +2,7 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
 from typing import List
-from srs.LLM_classification.config import Config
+from srs.LLM.config import Config
 IGNORE_INDEX = Config.IGNORE_INDEX
 
 class CorrectChatDataset(Dataset):

@@ -2,8 +2,8 @@ import torch
 import torch.nn.functional as F
 from transformers import GPT2Tokenizer
 
-from srs.LLM_classification.config import Config
-from model.GPT_full_model import GPT2Manager
+from srs.LLM.config import Config
+from model.Llama_full_model import GPT2Manager
 from dataset.chat_format import build_prompt as _build_prompt, USER_TOKEN, ASSISTANT_TOKEN, EOS_TOKEN
 
 

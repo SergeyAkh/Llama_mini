@@ -6,12 +6,12 @@ import os
 import numpy as np
 from transformers import GPT2LMHeadModel, GPT2Tokenizer, get_cosine_schedule_with_warmup
 from peft import LoraConfig, get_peft_model, TaskType
-from srs.LLM_classification.config import Config
-from model.GPT_full_model import GPT2Manager
+from srs.LLM.config import Config
+from model.Llama_full_model import GPT2Manager
 import dataset.Dataset_dataloader as DL
 
 import importlib
-import model.GPT_full_model as hf
+import model.Llama_full_model as hf
 importlib.reload(hf)
 
 def get_device(fixed=None):
