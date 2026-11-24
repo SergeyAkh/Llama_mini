@@ -29,21 +29,21 @@ import dataset.New_dataloader as DL
 from srs.inference.help import generate
 
 # =============================================================================== settings
-ADAPTER = None               # None = full fine-tune (recommended for the 124M model), "LoRA" or "DoRA"
+ADAPTER = "LoRA"              # None = full fine-tune (recommended for the 124M model), "LoRA" or "DoRA"
 LORA_R, LORA_ALPHA, LORA_DROPOUT = 16, 32, 0.05
 
 DATA, LANGUAGE, MAX_RANK = "all", "en", 1
 OASST_REPEAT = 2             # how many times the (multi-turn) OASST rows are seen per epoch
 
 MAX_LENGTH = 512             # tokens; longer conversations are cut after their last complete reply
-BATCH_SIZE = 4               # lower to 2 if the Mac runs out of memory, then raise GRAD_ACCUM to 16
-GRAD_ACCUM = 8               # effective batch = BATCH_SIZE * GRAD_ACCUM
+BATCH_SIZE = 2               # lower to 2 if the Mac runs out of memory, then raise GRAD_ACCUM to 16
+GRAD_ACCUM = 16              # effective batch = BATCH_SIZE * GRAD_ACCUM
 EPOCHS = 3
 
-DEVICE = None
+DEVICE = "cpu"
 
-FULL_FT_LR = {"gpt2-small (124M)": 5e-5, "gpt2-medium (355M)": 3e-5,
-              "gpt2-large (774M)": 2e-5, "gpt2-xl (1558M)": 1e-5}
+FULL_FT_LR = {"smollm2-135m": 5e-5}
+
 ADAPTER_LR = 2e-4
 WARMUP_FRAC = 0.03
 WEIGHT_DECAY = 0.01          # not used with adapters (see GPT_full_model.freeze_except_adapter)
@@ -73,7 +73,7 @@ def evaluate(model, dataloader, device, max_batches=None):
     dataloader.batch_sampler.set_epoch(0)          # same (seeded) batches every time
     total, count = 0.0, 0
     with torch.no_grad():
-        for i, batch in enumerate(dataloader):
+        for i, batch in enumerate(tqdm(dataloader, total=max_batches, desc="eval", leave=False)):
             if max_batches is not None and i >= max_batches:
                 break
             ids = batch["input_ids"].to(device)
@@ -107,7 +107,7 @@ def save_checkpoint(path, model, optimizer=None, scheduler=None, **extra):
 def show_training_example(dataloader, tokenizer, user_id):
     """Sanity check printed once: what the model actually gets trained on."""
     ds = dataloader.dataset
-    pick = next((i for i, (ids, _) in enumerate(ds.samples) if ids.count(user_id) >= 2), 0)
+    pick = next((i for i, (ids, _) in enumerate(ds.samples) if ids.count(user_id) >= 4), 0)
     ids, labels = ds.samples[pick]
     print("\n--- one training example (multi-turn if available) ---")
     print(tokenizer.decode(ids))
@@ -121,7 +121,7 @@ def main():
     device = get_device(fixed = DEVICE)
     tokenizer = get_tokenizer()
     model_type = Config.MODEL_TYPE
-    model_name = "custom_gpt2"
+    model_name = "llama"
     print(f"device: {device} | model: {model_type} | adapter: {ADAPTER}")
 
     # ---- data
@@ -134,7 +134,7 @@ def main():
                                     max_length=MAX_LENGTH, seed=SEED)
     val_dl = DL.create_dataloader(val_df["text"].tolist(), tokenizer, BATCH_SIZE, shuffle=True,
                                   max_length=MAX_LENGTH, seed=SEED)
-    show_training_example(train_dl, tokenizer, tokenizer.convert_tokens_to_ids(Config.USER_TOKEN))
+    show_training_example(train_dl, tokenizer, tokenizer.convert_tokens_to_ids(Config.IM_START))
 
     # ---- model
     model = get_model(model_name, tokenizer, lora=ADAPTER, r=LORA_R, alpha=LORA_ALPHA,

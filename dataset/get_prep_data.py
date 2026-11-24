@@ -174,3 +174,6 @@ def get_data_preprocessed(config, split_ratio=0.9, data="all", language="en", ma
     print(f"[data] built {tag}: train {len(train)} rows, val {len(val)} rows")
     print(train.groupby("source")["n_turns"].agg(["count", "mean"]).rename(columns={"count": "rows", "mean": "avg_turns"}))
     return train, val
+
+from srs.LLM.config import Config
+get_data_preprocessed(Config)

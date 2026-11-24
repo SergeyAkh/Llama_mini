@@ -1,10 +1,8 @@
 import torch
 import torch.nn.functional as F
-from transformers import GPT2Tokenizer
-
 from srs.LLM.config import Config
-from model.Llama_full_model import GPT2Manager
-from dataset.chat_format import build_prompt as _build_prompt, USER_TOKEN, ASSISTANT_TOKEN, EOS_TOKEN
+from model.Llama_full_model import LlamaManager
+from dataset.chat_format import build_prompt as _build_prompt, IM_START, IM_END, EOS_TOKEN
 
 
 def get_device(fixed = None):
@@ -17,18 +15,8 @@ def get_device(fixed = None):
     else:
         return torch.device(fixed)
 
-
-def get_tokenizer():
-    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-    tokenizer.eos_token = Config.EOS_TOKEN
-    tokenizer.add_special_tokens({
-        "additional_special_tokens": [Config.USER_TOKEN, Config.ASSIST_TOKEN]
-    })
-    return tokenizer
-
-
 def get_model(tokenizer, lora=True, r=8, alpha=8, dropout=0.5):
-    manager = GPT2Manager(use_lora=lora, r=r, alpha=alpha, dropout=dropout)
+    manager = LlamaManager(use_lora=lora, r=r, alpha=alpha, dropout=dropout)
     model = manager.get_model(tokenizer=tokenizer, inference=True)
     return model
 
@@ -43,31 +31,34 @@ def _as_prompt(prompt_or_history):
     if isinstance(prompt_or_history, (list, tuple)):
         return build_prompt(prompt_or_history)
     text = str(prompt_or_history)
-    if ASSISTANT_TOKEN in text:          # already a formatted prompt
+    if IM_START in text:          # already a formatted prompt
         return text
     return build_prompt([("user", text)])  # a plain user message
 
 
 @torch.no_grad()
 def generate(model, tokenizer, device, prompt_or_history, max_new_tokens=200, temperature=0.7,
-             top_k=40, top_p=0.9, repetition_penalty=1.1, context_length=1024, model_name="custom_gpt2"):
-    """Sampling with temperature / top-k / top-p / repetition penalty. Stops at <|endoftext|>.
+             top_k=40, top_p=0.9, repetition_penalty=1.1, context_length=Config.LLAMA_CONFIG["context_length"], model_name="custom_gpt2"):
+    """Sampling with temperature / top-k / top-p / repetition penalty. Stops at <|im_end|>.
 
     temperature <= 0 means greedy decoding. Returns the assistant reply as a string.
     """
     was_training = model.training
     model.eval()
-
     prompt = _as_prompt(prompt_or_history)
     ids = tokenizer.encode(prompt, add_special_tokens=False)
-    eos_id = tokenizer.convert_tokens_to_ids(EOS_TOKEN)
-    blocked = [tokenizer.convert_tokens_to_ids(USER_TOKEN), tokenizer.convert_tokens_to_ids(ASSISTANT_TOKEN)]
+    prompt_tensor = torch.tensor([ids], dtype=torch.long, device=device)  # (1, T)
+
+    eos_id = tokenizer.convert_tokens_to_ids(IM_END)
+    blocked = [tokenizer.convert_tokens_to_ids(IM_START)]
     generated = []
 
+    logits, caches = model(prompt_tensor, use_cache=True)
+
     for _ in range(max_new_tokens):
-        window = torch.tensor([ids[-context_length:]], dtype=torch.long, device=device)
-        out = model(window)
-        logits = (out.logits if model_name == "gpt2" else out)[0, -1, :].float()
+        if len(ids) >= context_length:
+            break
+        logits = logits[0, -1].float()
 
         logits[blocked] = float("-inf")           # role markers are never part of a reply
         if repetition_penalty and repetition_penalty != 1.0 and generated:
@@ -93,6 +84,9 @@ def generate(model, tokenizer, device, prompt_or_history, max_new_tokens=200, te
 
         if next_id == eos_id:
             break
+        next_input = torch.tensor([[next_id]], dtype=torch.long, device=device)
+        logits, caches = model(next_input, kv_caches=caches,
+                               start_pos=len(ids), use_cache=True)
         ids.append(next_id)
         generated.append(next_id)
 
@@ -113,3 +107,6 @@ def temp_predict(model_name, model, prompt, tokenizer, device, temperature=0.7, 
 def greedy_predict(model, prompt, tokenizer, device, max_new_tokens=200):
     return generate(model, tokenizer, device, prompt, max_new_tokens=max_new_tokens,
                     temperature=0.0, repetition_penalty=1.1)
+
+
+

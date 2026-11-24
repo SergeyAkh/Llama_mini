@@ -3,9 +3,9 @@
 Differences from the first version:
   * conversations are never cut in the middle of an answer: an over-long conversation is
     shortened to its last complete assistant reply that fits, and dropped if even the first
-    reply does not fit (so the closing <|endoftext|> is always present)
-  * labels: only assistant replies (plus the <|endoftext|> closing each one) are trained;
-    user text, the <|user|> / <|assistant|> markers and the template newline after <|assistant|> are masked
+    reply does not fit (so the closing <|im_end|> is always present)
+  * labels: only assistant replies (plus the <|im_end|> closing each one) are trained;
+    user text, the <|im_start|>assistant\n header and the newline after <|im_end|> are masked
   * length-bucketed, shuffled batches (less padding, faster on a Mac)
 """
 import torch
@@ -20,10 +20,8 @@ IGNORE_INDEX = Config.IGNORE_INDEX
 
 
 class ConversationDataset(Dataset):
-    def __init__(self, conversations, tokenizer, user_token_id, assistant_token_id, eos_token_id,
+    def __init__(self, conversations, tokenizer, header_ids, end_id,
                  max_length=512, ignore_index=IGNORE_INDEX, verbose=True):
-        newline_ids = tokenizer.encode("\n", add_special_tokens=False)
-        newline_id = newline_ids[0] if len(newline_ids) == 1 else None
         self.samples = []          # list of (input_ids, labels) python lists
         stats = {"kept": 0, "shortened_to_last_turn": 0, "dropped_too_long": 0,
                  "dropped_no_supervision": 0}
@@ -32,14 +30,18 @@ class ConversationDataset(Dataset):
         for start in tqdm(range(0, len(conversations), chunk), desc="tokenizing", disable=not verbose):
             batch_text = conversations[start:start + chunk]
             encoded = tokenizer(batch_text, add_special_tokens=False)["input_ids"]
+
             for ids in encoded:
+                labels = compute_labels(ids, header_ids, end_id, ignore_index)
+
                 if max_length and len(ids) > max_length:
-                    ids = truncate_to_last_complete_turn(ids, eos_token_id, max_length)
-                    if ids is None:
+                    result = truncate_to_last_complete_turn(ids, labels, end_id, max_length)
+                    if result is None:
                         stats["dropped_too_long"] += 1
                         continue
+                    ids, labels = result[0], result[1]
                     stats["shortened_to_last_turn"] += 1
-                labels = compute_labels(ids, user_token_id, assistant_token_id, ignore_index, newline_id)
+
                 if all(l == ignore_index for l in labels):
                     stats["dropped_no_supervision"] += 1
                     continue
@@ -81,20 +83,18 @@ def create_dataloader(conversations, tokenizer, batch_size=8, shuffle=True, max_
                       num_workers=0, seed=0):
     """Same signature as before (+ seed). Returns a DataLoader; dataloader.batch_sampler.set_epoch(e)
     changes the shuffling per epoch."""
-    assistant_token_id = tokenizer.convert_tokens_to_ids(Config.ASSIST_TOKEN)
-    user_token_id = tokenizer.convert_tokens_to_ids(Config.USER_TOKEN)
-    eos_token_id = tokenizer.convert_tokens_to_ids(Config.EOS_TOKEN)
+    header_ids = tokenizer.encode(Config.IM_START + "assistant\n", add_special_tokens=False)
+    end_id = tokenizer.convert_tokens_to_ids(Config.IM_END)
 
     dataset = ConversationDataset(
         conversations=list(conversations), tokenizer=tokenizer,
-        user_token_id=user_token_id, assistant_token_id=assistant_token_id,
-        eos_token_id=eos_token_id, max_length=max_length,
+        header_ids=header_ids, end_id=end_id, max_length=max_length,
     )
     sampler = BucketBatchSampler(dataset.lengths, batch_size, shuffle=shuffle, seed=seed)
     return DataLoader(
         dataset,
         batch_sampler=sampler,
         num_workers=num_workers,
-        collate_fn=lambda b: collate_fn(b, pad_token_id=eos_token_id),
+        collate_fn=lambda b: collate_fn(b, pad_token_id=tokenizer.pad_token_id),
         pin_memory=torch.cuda.is_available(),
     )

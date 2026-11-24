@@ -31,4 +31,5 @@ class LoRALinear(nn.Module):
     def merge(self):
         delta_w = self.B @ self.A
         self.linear.weight.data += self.scaling * delta_w
+        self.enabled = False      # adapter is now part of the weight — don't add it again
 

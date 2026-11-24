@@ -27,9 +27,11 @@ class Config:
     DATA_RAW_PATH = PROJECT_ROOT / "dataset" / "data" / "raw"
     MODEL_PATH = PROJECT_ROOT / "weights" / "model.pt"
     # tokenizer params
-    EOS_TOKEN = "<|endoftext|>"
-    USER_TOKEN = "<|user|>"
+    IM_START = "<|im_start|>"
+    IM_END = "<|im_end|>"
     ASSIST_TOKEN = "<|assistant|>"
+
+    LLAMA_REPO = "HuggingFaceTB/SmolLM2-135M"
 
     # LoRA params
     lora = True
@@ -41,7 +43,7 @@ class Config:
     GPT_WEIGHTS_PATH = PROJECT_ROOT / "gpt_trained_weights"
     MODEL_WEIGHTS_PATH = PROJECT_ROOT / "model_trained_weights"
     MODEL_NAME = "gpt2"
-    MODEL_TYPE = "gpt2-small (124M)"
+    MODEL_TYPE = "smollm2-135m"
     IGNORE_INDEX = -100
     BASE_CONFIG = {
         "vocab_size": 50257,

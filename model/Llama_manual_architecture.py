@@ -4,13 +4,7 @@ import torch
 import math
 import importlib
 import srs.LLM.config as cfg_module
-
-importlib.reload(cfg_module)
-from srs.LLM.config import Config
-
-
-
-
+import torch.nn.functional as F
 
 class SiLU(nn.Module):
     def __init__(self):
@@ -60,7 +54,7 @@ def compute_rope_params(head_dim, theta_base=10_000, context_length=4096):
 
         return torch.cos(angles), torch.sin(angles)
 
-def apply_rope(x, cos, sin):
+def apply_rope(x, cos, sin, offset=0):
     b, h, seq_len, head_dim = x.shape
 
     half = head_dim // 2
@@ -69,8 +63,8 @@ def apply_rope(x, cos, sin):
     x2 = x[...,half:]      # second half of the last dim
     rotated = torch.cat([-x2, x1], dim=-1)   # hint: (-x2, x1)
 
-    cos = cos[:seq_len, :]     # (seq_len, head_dim) — broadcasts over b and h
-    sin = sin[:seq_len, :]
+    cos = cos[offset:offset + seq_len, :]     # (seq_len, head_dim) — broadcasts over b and h
+    sin = sin[offset:offset + seq_len, :]
 
     return x * cos + rotated * sin
 
@@ -90,41 +84,38 @@ class GroupedQueryAttention(nn.Module):
         self.v_proj = nn.Linear(d_in, num_kv_groups * self.head_dim, bias=False)   # same as k_proj
         self.o_proj = nn.Linear(d_out, d_out, bias=False)
 
-    def forward(self, x, cos, sin, attention_mask=None):
-        b, num_tokens, _ = x.shape
+    def forward(self, x, cos, sin, attention_mask=None, kv_cache=None, start_pos=0):
+        b, T_new, _ = x.shape
 
         q = self.q_proj(x)
         k = self.k_proj(x)
         v = self.v_proj(x)
 
-        q = q.view(b, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(b, num_tokens, self.num_kv_groups, self.head_dim).transpose(1, 2)
-        v = v.view(b, num_tokens, self.num_kv_groups, self.head_dim).transpose(1, 2)
+        q = q.view(b, T_new, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(b, T_new, self.num_kv_groups, self.head_dim).transpose(1, 2)
+        v = v.view(b, T_new, self.num_kv_groups, self.head_dim).transpose(1, 2)
 
-        q = apply_rope(q, cos, sin)
-        k = apply_rope(k, cos, sin)
+        q = apply_rope(q, cos, sin, offset = start_pos)
+        k = apply_rope(k, cos, sin, offset = start_pos)
 
-        k = k.repeat_interleave(self.num_kv_groups, dim=1)
-        v = v.repeat_interleave(self.num_kv_groups, dim=1)
+        if kv_cache is not None:
+            past_k, past_v = kv_cache
+            k = torch.cat([past_k, k], dim=2)  # which dim is "tokens"?
+            v = torch.cat([past_v, v], dim=2)
+        new_cache = (k, v)  # saved BEFORE repeat_interleave
+        T_total = k.shape[2]
 
-
-        attn_scores = (q @ k.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        mask_bool = torch.triu(torch.ones(num_tokens, num_tokens, device=x.device), diagonal=1).bool()
-        attn_scores = attn_scores.masked_fill(mask_bool, -1e4)
+        allowed = ~torch.triu(torch.ones(T_new, T_total, dtype=torch.bool, device=x.device),
+                              diagonal=T_total - T_new + 1)
 
         if attention_mask is not None:
-            mask = attention_mask.unsqueeze(1).unsqueeze(2)
-            attn_scores = attn_scores.masked_fill(mask == 0, -1e4)
+            allowed = allowed & attention_mask[:, None, None, :].bool()
 
-        attn_weights = torch.softmax(attn_scores, dim=-1)
-
-        context_vec = (attn_weights @ v).transpose(1, 2)
-
-        context_vec = context_vec.contiguous().view(b, num_tokens, self.d_out)
+        context_vec = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed, enable_gqa=True)
+        context_vec = context_vec.transpose(1, 2)
+        context_vec = context_vec.contiguous().view(b, T_new, self.d_out)
         context_vec = self.o_proj(context_vec)
-
-        return context_vec
+        return context_vec, new_cache
 
 class TransformerBlock(nn.Module):
     def __init__(self, cfg):
@@ -138,23 +129,23 @@ class TransformerBlock(nn.Module):
         self.input_layernorm = RMSNorm(cfg["emb_dim"], eps=cfg["rms_eps"])
         self.post_attention_layernorm = RMSNorm(cfg["emb_dim"], eps=cfg["rms_eps"])
 
-    def forward(self, x, cos, sin, attention_mask=None):
+    def forward(self, x, cos, sin, attention_mask=None, kv_cache=None, start_pos=0):
         shortcut = x
         x = self.input_layernorm(x)
-        x = self.self_attn(x, cos, sin, attention_mask)
+        x, new_cache = self.self_attn(x, cos, sin, attention_mask, kv_cache, start_pos)
         x = x + shortcut
 
         shortcut = x
         x = self.post_attention_layernorm(x)
         x = self.mlp(x)
         x = x + shortcut
-        return x
+        return x, new_cache
 
 
 class LlamaModel(nn.Module):
     def __init__(self, cfg):
         super().__init__()
-        # self.model = None
+
         self.tok_emb = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"])
 
         self.trf_blocks = nn.ModuleList(
@@ -174,12 +165,25 @@ class LlamaModel(nn.Module):
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
-    def forward(self, input_ids, attention_mask = None):
+    def forward(self, input_ids, attention_mask = None, kv_caches=None, start_pos=0, use_cache=False):
         batch_size, seq_len = input_ids.shape
         x = self.tok_emb(input_ids)
-        for block in self.trf_blocks:
-            x = block(x, cos=self.cos, sin=self.sin, attention_mask=attention_mask)
+
+        if kv_caches is None:
+            kv_caches = [None] * len(self.trf_blocks)  # first call: no history yet
+
+        new_caches = []
+        for block, layer_cache in zip(self.trf_blocks, kv_caches):
+            x, layer_new_cache = block(x, self.cos, self.sin,
+                                       attention_mask=attention_mask,
+                                       kv_cache=layer_cache,  # this layer's old (k, v)
+                                       start_pos=start_pos)
+            new_caches.append(layer_new_cache)
 
         x = self.final_norm(x)
         logits = self.out_head(x)
+
+        if use_cache:
+            return logits, new_caches
+
         return logits

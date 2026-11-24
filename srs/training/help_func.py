@@ -7,8 +7,11 @@ import numpy as np
 from transformers import GPT2LMHeadModel, GPT2Tokenizer, get_cosine_schedule_with_warmup
 from peft import LoraConfig, get_peft_model, TaskType
 from srs.LLM.config import Config
-from model.Llama_full_model import GPT2Manager
+from model.Llama_full_model import LlamaManager
 import dataset.Dataset_dataloader as DL
+
+from transformers import AutoTokenizer
+
 
 import importlib
 import model.Llama_full_model as hf
@@ -35,17 +38,14 @@ def get_schedular(optimizer, dataloader, epoch, accum_steps):
 
 def get_tokenizer():
     if os.path.exists(Config.TOKENIZER_PATH):
-        tokenizer = GPT2Tokenizer.from_pretrained(Config.TOKENIZER_PATH)
-
+        tokenizer = AutoTokenizer.from_pretrained(Config.TOKENIZER_PATH)
     else:
-        tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+        tokenizer = AutoTokenizer.from_pretrained(Config.LLAMA_REPO)
         tokenizer.save_pretrained(Config.TOKENIZER_PATH)
 
-    tokenizer.eos_token = Config.EOS_TOKEN
-    tokenizer.add_special_tokens({
-        "additional_special_tokens": [Config.USER_TOKEN, Config.ASSIST_TOKEN]
-    })
+    tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
+
 
 def get_dataloader(tokenizer, dataset, batch_size, max_length, stride, shuffle=False):
 
@@ -61,26 +61,10 @@ def get_dataloader(tokenizer, dataset, batch_size, max_length, stride, shuffle=F
 # custom_gpt2 or gpt2
 def get_model(model: str,
         tokenizer, lora = True, r = 8, alpha = 8, dropout = 0.05):
-    if model == "gpt2":
+    manager = LlamaManager(use_lora=lora, r=r, alpha=alpha, dropout=dropout)
+    print(f"Imported {model} with ADAPTER - {lora}")
+    return manager.get_model(tokenizer=tokenizer)
 
-        model = GPT2LMHeadModel.from_pretrained("gpt2")
-        model.resize_token_embeddings(len(tokenizer))
-        if lora:
-            lora_config = LoraConfig(
-                task_type=TaskType.CAUSAL_LM,
-                r=r,
-                lora_alpha=alpha,
-                lora_dropout=dropout,
-                target_modules=["c_attn", "c_proj"]  # GPT-2 specific
-            )
-            model = get_peft_model(model, lora_config)
-        print(f"Imported GPT2LMHeadModel model with LoRA = {lora}")
-        return model
-    elif model == "custom_gpt2":
-        manager = GPT2Manager(use_lora=lora, r=r, alpha=alpha, dropout=dropout)
-        print(f"Imported {model} with LoRA - {lora}")
-        return manager.get_model(tokenizer=tokenizer)
-    return None
 
 
 # =========================
